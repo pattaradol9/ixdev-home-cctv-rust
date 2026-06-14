@@ -1,0 +1,16 @@
+[workspace]
+members  = ["src-tauri"]
+resolver = "2"
+
+# brotli 8.0.3 depends on alloc-no-stdlib 2.x directly while alloc-stdlib
+# (also a brotli dep) requires 3.x — causes a trait conflict at compile time.
+# Vendor a fixed copy that aligns both on alloc-no-stdlib 3.x.
+[patch.crates-io]
+brotli = { path = "vendor/brotli" }
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+strip         = true
+
