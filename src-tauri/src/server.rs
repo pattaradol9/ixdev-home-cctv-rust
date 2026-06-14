@@ -89,28 +89,62 @@ fn env_u16(key: &str, default: u16) -> u16 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
+pub fn log(msg: &str) {
+    use std::io::Write;
+    eprintln!("{msg}");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/ixdev-cctv.log")
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
+}
+
 fn find_ffmpeg() -> String {
+    // Allow explicit override — useful when ffmpeg lives in a non-standard location.
+    if let Ok(v) = std::env::var("FFMPEG_BIN") {
+        if !v.trim().is_empty() {
+            log(&format!("[ffmpeg] using FFMPEG_BIN override: {v}"));
+            return v;
+        }
+    }
+
+    // Explicit absolute paths come first so the bundled .app (which has a
+    // minimal PATH with no Homebrew) can still find ffmpeg.
     let candidates: &[&str] = if cfg!(windows) {
-        &["ffmpeg.exe"]
+        &[
+            "C:\\ffmpeg\\bin\\ffmpeg.exe",
+            "ffmpeg.exe",
+        ]
     } else {
         &[
-            "ffmpeg",
-            "/opt/homebrew/bin/ffmpeg",
-            "/usr/local/bin/ffmpeg",
-            "/usr/bin/ffmpeg",
+            "/opt/homebrew/bin/ffmpeg",   // macOS Apple Silicon — Homebrew
+            "/usr/local/bin/ffmpeg",      // macOS Intel — Homebrew / manual
+            "/opt/local/bin/ffmpeg",      // MacPorts
+            "/usr/bin/ffmpeg",            // Linux system
+            "ffmpeg",                     // PATH fallback (works in dev shell)
         ]
     };
+
     for &c in candidates {
-        if std::process::Command::new(c)
+        let ok = std::process::Command::new(c)
             .args(["-version"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .is_ok()
-        {
+            .is_ok();
+        if ok {
+            log(&format!("[ffmpeg] found: {c}"));
             return c.to_string();
         }
     }
+
+    log("[ffmpeg] WARNING: not found in any known location — streams will fail");
     "ffmpeg".to_string()
 }
 
@@ -302,7 +336,10 @@ async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
         .spawn()
     {
         Ok(c)  => c,
-        Err(e) => { eprintln!("[ffmpeg] spawn error: {e}"); return; }
+        Err(e) => {
+            log(&format!("[ffmpeg] spawn error ch={ch} bin={}: {e}", state.ffmpeg_bin));
+            return;
+        }
     };
 
     let mut stdout = child.stdout.take().unwrap();
@@ -327,8 +364,9 @@ async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
             _ = &mut close_rx => break,
             result = stdout.read(&mut tmp) => {
                 let n = match result {
-                    Ok(0) | Err(_) => break,
-                    Ok(n)           => n,
+                    Ok(0) => { log(&format!("[ffmpeg] stdout EOF ch={ch}")); break; }
+                    Err(e) => { log(&format!("[ffmpeg] stdout read error ch={ch}: {e}")); break; }
+                    Ok(n)  => n,
                 };
 
                 if buf.len() + n > MAX_BUF { buf.clear(); }

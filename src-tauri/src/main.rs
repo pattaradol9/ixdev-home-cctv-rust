@@ -68,6 +68,20 @@ fn set_quality(app: &tauri::AppHandle, state: &AppState, q: Quality) {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
+    // When launched as a .app bundle from Finder/Dock, macOS sets PATH to
+    // /usr/bin:/bin:/usr/sbin:/sbin — Homebrew paths are missing.
+    // Prepend them so that ffmpeg (and any child process) can be resolved.
+    #[cfg(not(windows))]
+    {
+        let cur = std::env::var("PATH").unwrap_or_default();
+        if !cur.contains("/opt/homebrew/bin") {
+            std::env::set_var(
+                "PATH",
+                format!("/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:{cur}"),
+            );
+        }
+    }
+
     let state = AppState::new();
 
     tauri::Builder::default()
