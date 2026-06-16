@@ -48,12 +48,12 @@ impl Quality {
     // Returns (fps, q:v) for grid (hd=false) or fullscreen (hd=true)
     fn params(self, hd: bool) -> (u32, u32) {
         match (self, hd) {
-            // ponytail: grid fps cut ~40% to reduce data flooding the macOS WKWebView Networking process
-            (Self::Low,    false) => (3,  8),
+            // ponytail: grid fps low — reduces data volume in macOS WKWebView Networking process buffers
+            (Self::Low,    false) => (1,  8),
             (Self::Low,    true)  => (12, 5),
-            (Self::Medium, false) => (5,  6),
+            (Self::Medium, false) => (2,  6),
             (Self::Medium, true)  => (15, 3),
-            (Self::High,   false) => (8,  3),
+            (Self::High,   false) => (4,  3),
             (Self::High,   true)  => (20, 2),
         }
     }

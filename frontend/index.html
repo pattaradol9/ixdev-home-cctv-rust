@@ -270,17 +270,17 @@
       const ns     = document.getElementById(`ns-${ch}`);
       const cell   = canvas.parentElement;
 
-      // Throttle: at most 1 decode in-flight + 1 pending blob per camera.
-      // Newer frames replace the pending one so blobs never accumulate.
-      let pendingBlob = null;
+      // Throttle: at most 1 decode in-flight + 1 pending frame per camera.
+      // Newer frames replace the pending one; Blob created only at decode time.
+      let pendingData = null; // raw ArrayBuffer — cheaper to replace than Blob
       let decoding    = false;
 
       function processNext() {
-        if (!pendingBlob || decoding) return;
+        if (!pendingData || decoding) return;
         decoding = true;
-        const blob = pendingBlob;
-        pendingBlob = null;
-        createImageBitmap(blob).then(bitmap => {
+        const buf = pendingData;
+        pendingData = null;
+        createImageBitmap(new Blob([buf], { type: 'image/jpeg' })).then(bitmap => {
           const w = canvas.parentElement.clientWidth;
           const h = canvas.parentElement.clientHeight;
           if (canvas.width !== w || canvas.height !== h) {
@@ -304,7 +304,7 @@
       };
 
       ws.onmessage = (event) => {
-        pendingBlob = new Blob([event.data], { type: 'image/jpeg' }); // latest frame wins
+        pendingData = event.data; // latest frame wins; old ArrayBuffer is GC'd immediately
         processNext();
       };
 
@@ -508,15 +508,15 @@
 
       // Skip the first few frames — DVR HD encoder outputs gray/corrupt frames on startup
       let warmup = 5;
-      let modalPendingBlob = null;
+      let modalPendingData = null;
       let modalDecoding    = false;
 
       function processModalNext() {
-        if (!modalPendingBlob || modalDecoding) return;
+        if (!modalPendingData || modalDecoding) return;
         modalDecoding = true;
-        const blob = modalPendingBlob;
-        modalPendingBlob = null;
-        createImageBitmap(blob).then(bitmap => {
+        const buf = modalPendingData;
+        modalPendingData = null;
+        createImageBitmap(new Blob([buf], { type: 'image/jpeg' })).then(bitmap => {
           if (modalCanvas.width !== bitmap.width || modalCanvas.height !== bitmap.height) {
             modalCanvas.width  = bitmap.width;
             modalCanvas.height = bitmap.height;
@@ -534,7 +534,7 @@
 
       ws.onmessage = (event) => {
         if (warmup > 0) { warmup--; return; }
-        modalPendingBlob = new Blob([event.data], { type: 'image/jpeg' });
+        modalPendingData = event.data;
         processModalNext();
       };
 
@@ -572,6 +572,19 @@
     });
 
     init();
+
+    // Pause streams when window is hidden (minimised/backgrounded) to stop RAM accumulating
+    // in the macOS WKWebView Networking process. Resume on show.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) window.pauseStreams();
+      else if (!loginOverlay.classList.contains('hidden')) window.resumeStreams();
+    });
+
+    // ponytail: periodic reconnect flushes Networking process TCP buffers that
+    // accumulate over long sessions; 90 min is enough for a 24/7 CCTV install.
+    setInterval(() => {
+      if (!loginOverlay.classList.contains('hidden') && !document.hidden) window.refreshAllCameras();
+    }, 90 * 60 * 1000);
   </script>
 
 </body>
