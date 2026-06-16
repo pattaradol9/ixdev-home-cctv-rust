@@ -17,7 +17,8 @@ use tokio::{io::AsyncReadExt, net::TcpListener, time};
 
 const SOI: [u8; 2]    = [0xff, 0xd8];
 const EOI: [u8; 2]    = [0xff, 0xd9];
-const MAX_BUF: usize  = 2 * 1024 * 1024;
+// ponytail: 512KB per stream — frames >512KB are corrupt anyway; was 2MB
+const MAX_BUF: usize  = 512 * 1024;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -47,11 +48,12 @@ impl Quality {
     // Returns (fps, q:v) for grid (hd=false) or fullscreen (hd=true)
     fn params(self, hd: bool) -> (u32, u32) {
         match (self, hd) {
-            (Self::Low,    false) => (5,  8),
+            // ponytail: grid fps cut ~40% to reduce data flooding the macOS WKWebView Networking process
+            (Self::Low,    false) => (3,  8),
             (Self::Low,    true)  => (12, 5),
-            (Self::Medium, false) => (8,  6),
+            (Self::Medium, false) => (5,  6),
             (Self::Medium, true)  => (15, 3),
-            (Self::High,   false) => (12, 3),
+            (Self::High,   false) => (8,  3),
             (Self::High,   true)  => (20, 2),
         }
     }
@@ -179,15 +181,16 @@ pub fn get_stats() -> (f64, u64) {
 
     #[cfg(target_os = "macos")]
     {
-        // ps -o rss= -p PID  →  RSS in KB
+        // Sum RSS of all ixdev-cctv-related processes (main, Networking, Graphics and Media, AutoFill)
         if let Ok(out) = std::process::Command::new("ps")
-            .args(["-o", "rss=", "-p", &pid.to_string()])
+            .args(["-A", "-o", "rss=,comm="])
             .output()
         {
-            let ram = String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .parse::<u64>()
-                .unwrap_or(0)
+            let ram: u64 = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| l.contains("ixdev-cctv"))
+                .filter_map(|l| l.split_whitespace().next()?.parse::<u64>().ok())
+                .sum::<u64>()
                 / 1024;
             return (0.0, ram);
         }
@@ -351,6 +354,20 @@ async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
     let mut stdout = child.stdout.take().unwrap();
     let (mut tx, mut rx) = socket.split();
 
+    // ponytail: capacity=1 — reader drops frames rather than letting them pile up in
+    // the macOS WKWebView Networking process buffers (which caused the 1+ GB usage).
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+
+    // WS sender task: pulls one frame at a time, 5 s timeout guards dead connections
+    let sender = tokio::spawn(async move {
+        while let Some(frame) = frame_rx.recv().await {
+            match time::timeout(Duration::from_secs(5), tx.send(Message::Binary(frame))).await {
+                Ok(Ok(_)) => {}
+                _         => break,
+            }
+        }
+    });
+
     // Detect WebSocket close from the client side
     let (close_tx, mut close_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
@@ -387,19 +404,18 @@ async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
                     };
                     let frame = buf[s..e + 2].to_vec();
                     buf.drain(..e + 2);
-                    // Timeout prevents zombie tasks when the client TCP connection
-                    // dies without a proper close handshake (macOS default keepalive
-                    // is 2 h, so without this, ffmpeg + task would run for hours).
-                    match time::timeout(Duration::from_secs(10), tx.send(Message::Binary(frame))).await {
-                        Ok(Ok(_))  => {}
-                        Ok(Err(_)) => break 'outer, // WebSocket closed
-                        Err(_)     => break 'outer, // send stalled for 10 s → dead connection
+                    match frame_tx.try_send(frame) {
+                        Ok(_)                                                      => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_))      => {} // sender busy — drop frame
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_))    => break 'outer, // WS dead
                     }
                 }
             }
         }
     }
 
+    drop(frame_tx);
+    sender.abort();
     let _ = child.kill().await;
 }
 
