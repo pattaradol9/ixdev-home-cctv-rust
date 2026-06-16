@@ -10,7 +10,8 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
-use tokio::{io::AsyncReadExt, net::TcpListener};
+use std::time::Duration;
+use tokio::{io::AsyncReadExt, net::TcpListener, time};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -92,10 +93,15 @@ fn env_u16(key: &str, default: u16) -> u16 {
 pub fn log(msg: &str) {
     use std::io::Write;
     eprintln!("{msg}");
+    const LOG_PATH: &str = "/tmp/ixdev-cctv.log";
+    const MAX_LOG:  u64  = 5 * 1024 * 1024; // 5 MB — rotate when exceeded
+    if std::fs::metadata(LOG_PATH).map(|m| m.len()).unwrap_or(0) > MAX_LOG {
+        let _ = std::fs::remove_file(LOG_PATH);
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/ixdev-cctv.log")
+        .open(LOG_PATH)
     {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -381,8 +387,13 @@ async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
                     };
                     let frame = buf[s..e + 2].to_vec();
                     buf.drain(..e + 2);
-                    if tx.send(Message::Binary(frame)).await.is_err() {
-                        break 'outer;
+                    // Timeout prevents zombie tasks when the client TCP connection
+                    // dies without a proper close handshake (macOS default keepalive
+                    // is 2 h, so without this, ffmpeg + task would run for hours).
+                    match time::timeout(Duration::from_secs(10), tx.send(Message::Binary(frame))).await {
+                        Ok(Ok(_))  => {}
+                        Ok(Err(_)) => break 'outer, // WebSocket closed
+                        Err(_)     => break 'outer, // send stalled for 10 s → dead connection
                     }
                 }
             }

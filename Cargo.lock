@@ -1632,6 +1632,7 @@ name = "ixdev-cctv"
 version = "1.0.0"
 dependencies = [
  "axum",
+ "dpi",
  "futures",
  "serde",
  "serde_json",

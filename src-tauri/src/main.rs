@@ -4,12 +4,42 @@
 mod server;
 
 use server::{get_stats, AppState, Quality};
+use dpi::{PhysicalPosition, PhysicalSize};
 use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
     Manager, WindowEvent,
 };
+
+// ── Window state persistence ───────────────────────────────────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WindowState {
+    x:      i32,
+    y:      i32,
+    width:  u32,
+    height: u32,
+}
+
+fn window_state_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    let dir = app.path().app_local_data_dir().ok()?;
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join("window-state.json"))
+}
+
+fn load_window_state(app: &tauri::AppHandle) -> Option<WindowState> {
+    let data = std::fs::read_to_string(window_state_path(app)?).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn save_window_state(window: &tauri::WebviewWindow) {
+    let Ok(pos)  = window.outer_position() else { return };
+    let Ok(size) = window.inner_size()      else { return };
+    let state    = WindowState { x: pos.x, y: pos.y, width: size.width, height: size.height };
+    let Some(path) = window_state_path(window.app_handle()) else { return };
+    if let Ok(json) = serde_json::to_string(&state) { let _ = std::fs::write(path, json); }
+}
 
 // ── Tray menu ─────────────────────────────────────────────────────────────────
 
@@ -99,11 +129,18 @@ fn main() {
                 let url = tauri::WebviewUrl::External(
                     url::Url::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
                 );
-                tauri::WebviewWindowBuilder::new(app, "main", url)
+                let window = tauri::WebviewWindowBuilder::new(app, "main", url)
                     .title("ixdev-cctv")
                     .inner_size(1280.0, 800.0)
                     .min_inner_size(320.0, 240.0)
                     .build()?;
+
+                // Restore saved position/size using physical coordinates to avoid
+                // any DPI/scale-factor conversion ambiguity in the builder.
+                if let Some(ws) = load_window_state(app.handle()) {
+                    let _ = window.set_position(PhysicalPosition::new(ws.x, ws.y));
+                    let _ = window.set_size(PhysicalSize::new(ws.width, ws.height));
+                }
 
                 // ── Tray icon (44 px for correct Retina @2x menu-bar size) ──
                 let icon_bytes = include_bytes!("../icons/tray-icon-44.png");
@@ -127,7 +164,12 @@ fn main() {
                             "q-medium" => set_quality(app, &state_tray, Quality::Medium),
                             "q-high"   => set_quality(app, &state_tray, Quality::High),
                             "refresh"  => refresh_cameras(app),
-                            "quit"     => app.exit(0),
+                            "quit"     => {
+                                if let Some(w) = app.get_webview_window("main") {
+                                    save_window_state(&w);
+                                }
+                                app.exit(0);
+                            }
                             _          => {}
                         }
                     })
@@ -164,10 +206,13 @@ fn main() {
                 Ok(())
             }
         })
-        // X button → hide to tray, don't quit
+        // X button → save state, hide to tray, don't quit
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
+                    if let Some(w) = window.app_handle().get_webview_window("main") {
+                        save_window_state(&w);
+                    }
                     let _ = window.hide();
                     api.prevent_close();
                 }

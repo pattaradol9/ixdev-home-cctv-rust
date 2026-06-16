@@ -294,8 +294,8 @@
       }
 
       const ws = new WebSocket(`ws://${location.host}/ws/${ch}`);
-      ws.binaryType = 'blob';
-      wsMap[ch] = ws;
+      ws.binaryType = 'arraybuffer'; // arraybuffer releases from the WKWebView networking
+      wsMap[ch] = ws;               // process immediately; blob can linger until GC
 
       ws.onopen = () => {
         if (dot)  dot.className = 'status-dot';
@@ -304,7 +304,7 @@
       };
 
       ws.onmessage = (event) => {
-        pendingBlob = event.data;  // latest frame wins
+        pendingBlob = new Blob([event.data], { type: 'image/jpeg' }); // latest frame wins
         processNext();
       };
 
@@ -503,7 +503,7 @@
       modalCtx.clearRect(0, 0, modalCanvas.width, modalCanvas.height);
 
       const ws = new WebSocket(`ws://${location.host}/ws/${ch}?hd=1`);
-      ws.binaryType = 'blob';
+      ws.binaryType = 'arraybuffer';
       modalWS = ws;
 
       // Skip the first few frames — DVR HD encoder outputs gray/corrupt frames on startup
@@ -534,7 +534,7 @@
 
       ws.onmessage = (event) => {
         if (warmup > 0) { warmup--; return; }
-        modalPendingBlob = event.data;
+        modalPendingBlob = new Blob([event.data], { type: 'image/jpeg' });
         processModalNext();
       };
 
