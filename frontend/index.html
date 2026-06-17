@@ -281,8 +281,11 @@
         const buf = pendingData;
         pendingData = null;
         createImageBitmap(new Blob([buf], { type: 'image/jpeg' })).then(bitmap => {
-          const w = canvas.parentElement.clientWidth;
-          const h = canvas.parentElement.clientHeight;
+          // Size the backing store in device pixels so HiDPI/Retina screens
+          // don't upscale a CSS-pixel canvas a second time (softens the image).
+          const dpr = window.devicePixelRatio || 1;
+          const w = Math.round(canvas.parentElement.clientWidth  * dpr);
+          const h = Math.round(canvas.parentElement.clientHeight * dpr);
           if (canvas.width !== w || canvas.height !== h) {
             canvas.width = w; canvas.height = h;
           }

@@ -326,7 +326,7 @@ async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
 
     let mut child = match tokio::process::Command::new(state.ffmpeg_bin.as_str())
         .args([
-            "-loglevel",        "quiet",
+            "-loglevel",        "error",
             "-fflags",          "nobuffer",
             "-flags",           "low_delay",
             "-probesize",       "1024",
@@ -340,7 +340,7 @@ async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
             "pipe:1",
         ])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null())
         .spawn()
     {
@@ -352,6 +352,19 @@ async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
     };
 
     let mut stdout = child.stdout.take().unwrap();
+
+    // Surface ffmpeg errors (auth failures, RTSP refused, decode errors) to the
+    // log instead of failing silently. -loglevel error keeps this low-volume.
+    if let Some(mut stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf).await;
+            if !buf.is_empty() {
+                log(&format!("[ffmpeg] stderr ch={ch}: {}", String::from_utf8_lossy(&buf)));
+            }
+        });
+    }
+
     let (mut tx, mut rx) = socket.split();
 
     // ponytail: capacity=1 — reader drops frames rather than letting them pile up in
