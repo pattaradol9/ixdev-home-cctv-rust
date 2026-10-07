@@ -8,6 +8,7 @@ use axum::{
     Json, Router,
 };
 use futures::{SinkExt, StreamExt};
+use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -72,13 +73,39 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            session:    Arc::new(RwLock::new(None)),
+            session:    Arc::new(RwLock::new(load_session())),
             quality:    Arc::new(RwLock::new(Quality::Medium)),
             cameras:    env_usize("CAMERAS", 8),
             slots:      9,
             dvr_port:   env_u16("DVR_PORT", 554),
             ffmpeg_bin: Arc::new(find_ffmpeg()),
         }
+    }
+}
+
+// ── Session persistence (stay logged in across restarts) ────────────────────────
+// Stored in the OS credential store (Keychain/Credential Manager/Secret Service)
+// via `keyring` — native to each platform, so the DVR password never sits on
+// disk in plain text.
+const KEYRING_SERVICE: &str = "ixdev-cctv";
+const KEYRING_USER:    &str = "dvr-session";
+
+fn load_session() -> Option<Session> {
+    let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()?;
+    let json  = entry.get_password().ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+fn save_session(session: &Session) {
+    let Ok(entry) = Entry::new(KEYRING_SERVICE, KEYRING_USER) else { return };
+    if let Ok(json) = serde_json::to_string(session) {
+        let _ = entry.set_password(&json);
+    }
+}
+
+fn clear_session() {
+    if let Ok(entry) = Entry::new(KEYRING_SERVICE, KEYRING_USER) {
+        let _ = entry.delete_credential();
     }
 }
 
@@ -263,16 +290,19 @@ async fn login(
             Json(ApiResult { ok: None, error: Some("Please enter DVR IP Address".into()) }),
         );
     }
-    *s.session.write().unwrap() = Some(Session {
+    let session = Session {
         dvr_user: body.username.trim().into(),
         dvr_pass: body.password,
         dvr_ip:   body.dvr_ip.trim().into(),
-    });
+    };
+    save_session(&session);
+    *s.session.write().unwrap() = Some(session);
     (axum::http::StatusCode::OK, Json(ApiResult { ok: Some(true), error: None }))
 }
 
 async fn logout(State(s): State<AppState>) -> Json<ApiResult> {
     *s.session.write().unwrap() = None;
+    clear_session();
     Json(ApiResult { ok: Some(true), error: None })
 }
 

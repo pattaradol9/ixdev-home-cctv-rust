@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="lens" cx="35%" cy="30%" r="80%">
+      <stop offset="0%"   stop-color="#60a5fa"/>
+      <stop offset="55%"  stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Dark neutral rounded-square background -->
+  <rect width="1024" height="1024" rx="224" fill="#0f1115"/>
+
+  <!-- Outer ring -->
+  <circle cx="512" cy="512" r="300" fill="none" stroke="#2a2f3a" stroke-width="28"/>
+
+  <!-- Lens -->
+  <circle cx="512" cy="512" r="220" fill="url(#lens)"/>
+  <circle cx="460" cy="452" r="42" fill="#ffffff" opacity="0.30"/>
+
+  <!-- Iris -->
+  <circle cx="512" cy="512" r="90" fill="#0f1115"/>
+
+  <!-- Recording accent -->
+  <circle cx="742" cy="282" r="44" fill="#ef4444"/>
+</svg>

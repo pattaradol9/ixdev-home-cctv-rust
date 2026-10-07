@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Simple solid dot — reads cleanly at 16-22pt menu-bar size, matches the
+       app's own "rec-dot" motif. Rings/holes don't survive downscaling well. -->
+  <circle cx="512" cy="512" r="360" fill="white"/>
+</svg>

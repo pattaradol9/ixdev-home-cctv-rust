@@ -16,3 +16,12 @@ futures     = "0.3"
 url         = "2"
 dpi         = "0.1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "4.2.0", default-features = false, features = ["v1", "apple-native-keyring-store"] }
+
+[target."cfg(windows)".dependencies]
+keyring = { version = "4.2.0", default-features = false, features = ["v1", "windows-native-keyring-store"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "4.2.0", default-features = false, features = ["v1", "zbus-secret-service-keyring-store"] }
+
