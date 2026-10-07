@@ -13,6 +13,8 @@ cargo run -p ixdev-cctv              # dev run (debug, opens window + tray)
 cargo build -p ixdev-cctv            # debug build
 cargo build --release -p ixdev-cctv  # release build (LTO, stripped)
 cargo tauri build                    # package .dmg/.app (needs: cargo install tauri-cli --version "^2")
+# macOS: sign with a stable cert or Local Network permission resets on every build (ad-hoc cdhash changes):
+# APPLE_SIGNING_IDENTITY="ixdev-cctv-dev" cargo tauri build   (self-signed code-signing cert in login keychain)
 ```
 
 Runtime config via env vars: `DVR_IP` (default `192.168.0.30`), `DVR_PORT` (`554`), `CAMERAS` (`8`), `FFMPEG_BIN` (override ffmpeg path).
