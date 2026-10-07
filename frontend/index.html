@@ -281,12 +281,81 @@
     let CAMERAS = 8;
     let SLOTS   = 9;
 
+    // ── HEVC passthrough player (WebCodecs, hw decode) ──
+    // Server forwards the camera's H.265 untouched = native fps. [1 byte key flag][Annex-B AU].
+    // ponytail: on any failure (unsupported, decoder error, no frame in 4 s) caller falls back to MJPEG.
+    let hevcBroken = !window.VideoDecoder;
+
+    function hevcCodec(au) {
+      // SPS NAL (type 33): 00 00 01 42 01 <vps/layers> <ptl: space|tier|idc, compat[4], constraint[6], level>
+      for (let i = 0; i + 24 < au.length; i++) {
+        if (au[i] || au[i+1] || au[i+2] !== 1 || au[i+3] !== 0x42) continue;
+        const p = [];
+        for (let j = i + 5; p.length < 13 && j < au.length; j++) {
+          if (au[j] === 3 && au[j-1] === 0 && au[j-2] === 0) continue; // emulation prevention
+          p.push(au[j]);
+        }
+        let compat = 0;
+        for (let b = 0; b < 32; b++) if ((((p[2] << 24 | p[3] << 16 | p[4] << 8 | p[5]) >>> b) & 1)) compat |= 1 << (31 - b);
+        const cons = p.slice(6, 12);
+        while (cons.length && !cons[cons.length - 1]) cons.pop();
+        const hex = (n) => n.toString(16).toUpperCase();
+        return `hev1.${p[1] & 0x1f}.${hex(compat >>> 0)}.${p[1] & 0x20 ? 'H' : 'L'}${p[12]}` + cons.map((c) => '.' + hex(c)).join('');
+      }
+      return null;
+    }
+
+    function playHevc(url, draw, cb) {
+      const ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
+      let dec = null, got = false, dead = false, needKey = true;
+      const kill = () => { clearTimeout(timer); try { dec && dec.close(); } catch {} };
+      const fail = () => {
+        if (dead) return;
+        dead = true; hevcBroken = true; kill();
+        ws.onclose = ws.onerror = null; ws.close();
+        cb.fail();
+      };
+      const timer = setTimeout(() => { if (!got) fail(); }, 4000);
+      const rawClose = ws.close.bind(ws);
+      ws.close = () => { dead = true; kill(); rawClose(); }; // also frees the decoder
+
+      ws.onopen = cb.open;
+      ws.onmessage = (ev) => {
+        if (dead) return;
+        const d = new Uint8Array(ev.data), key = d[0] === 1, au = d.subarray(1);
+        if (!dec) {
+          if (!key) return;
+          const codec = hevcCodec(au);
+          if (!codec) return fail();
+          try {
+            dec = new VideoDecoder({
+              output: (f) => { got = true; draw(f); f.close(); },
+              error: fail,
+            });
+            dec.configure({ codec, optimizeForLatency: true });
+          } catch { return fail(); }
+        }
+        if (key) needKey = false;
+        else if (needKey || dec.decodeQueueSize > 3) { needKey = true; return; } // newest wins; resync on next keyframe
+        try {
+          dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: performance.now() * 1000, data: au }));
+        } catch { fail(); }
+      };
+      ws.onclose = ws.onerror = () => {
+        if (dead) return;
+        if (!got) return fail();
+        dead = true; kill(); cb.close();
+      };
+      return ws;
+    }
+
     // ── WebSocket per camera ────────────────────────────
     const wsMap = {};
     const reconnectTimers = {};
     let streamsPaused = false;
 
-    function connectCamera(ch) {
+    function connectCamera(ch, mjpeg = hevcBroken) {
       if (streamsPaused) return;
 
       const canvas = document.getElementById(`canvas-${ch}`);
@@ -321,23 +390,12 @@
         }).catch(() => { decoding = false; processNext(); });
       }
 
-      const ws = new WebSocket(`ws://${location.host}/ws/${ch}`);
-      ws.binaryType = 'arraybuffer'; // arraybuffer releases from the WKWebView networking
-      wsMap[ch] = ws;               // process immediately; blob can linger until GC
-
-      ws.onopen = () => {
+      const onOpen = () => {
         if (dot)  dot.className = 'status-dot';
         if (ns)   ns.style.display = 'none';
         if (cell) cell.classList.add('live');
       };
-
-      ws.onmessage = (event) => {
-        pendingData = event.data; // latest frame wins; old ArrayBuffer is GC'd immediately
-        processNext();
-      };
-
-      ws.onclose = ws.onerror = () => {
-        pendingBlob = null;
+      const onClose = () => {
         if (dot)  dot.className = 'status-dot offline';
         if (ns)   ns.style.display = 'flex';
         if (cell) cell.classList.remove('live');
@@ -346,6 +404,28 @@
           reconnectTimers[ch] = setTimeout(() => { reconnectTimers[ch] = null; connectCamera(ch); }, 5000);
         }
       };
+
+      if (!mjpeg) {
+        wsMap[ch] = playHevc(`ws://${location.host}/ws/${ch}?pass=1`, (f) => {
+          const dpr = window.devicePixelRatio || 1;
+          const w = Math.round(cell.clientWidth * dpr), h = Math.round(cell.clientHeight * dpr);
+          if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+          ctx.drawImage(f, 0, 0, w, h);
+        }, { open: onOpen, close: onClose, fail: () => { wsMap[ch] = null; connectCamera(ch, true); } });
+        return;
+      }
+
+      const ws = new WebSocket(`ws://${location.host}/ws/${ch}`);
+      ws.binaryType = 'arraybuffer'; // arraybuffer releases from the WKWebView networking
+      wsMap[ch] = ws;               // process immediately; blob can linger until GC
+      ws.onopen = onOpen;
+
+      ws.onmessage = (event) => {
+        pendingData = event.data; // latest frame wins; old ArrayBuffer is GC'd immediately
+        processNext();
+      };
+
+      ws.onclose = ws.onerror = () => { pendingData = null; onClose(); };
     }
 
     function startStreams() {
@@ -524,12 +604,29 @@
     const modalDot    = document.getElementById('modal-dot');
     let   modalWS     = null;
 
-    function openModal(ch, name) {
+        function openModal(ch, name, mjpeg = false) {
       if (modalWS) { modalWS.close(); modalWS = null; }
-
-      // Clear any stale frame from a previous session
       modalCtx.clearRect(0, 0, modalCanvas.width, modalCanvas.height);
+      modalLabel.textContent = `CH ${ch}  ·  ${name}`;
+      modal.classList.add('open');
+      if (!mjpeg && !hevcBroken) return openModalH264(ch, name);
+      openModalMjpeg(ch);
+    }
 
+    function openModalH264(ch, name) {
+      modalWS = playHevc(`ws://${location.host}/ws/${ch}?hd=1&pass=1`, (f) => {
+        if (modalCanvas.width !== f.displayWidth || modalCanvas.height !== f.displayHeight) {
+          modalCanvas.width = f.displayWidth; modalCanvas.height = f.displayHeight;
+        }
+        modalCtx.drawImage(f, 0, 0);
+      }, {
+        open:  () => { modalDot.className = 'status-dot'; },
+        close: () => { modalDot.className = 'status-dot offline'; },
+        fail:  () => { modalWS = null; openModal(ch, name, true); },
+      });
+    }
+
+    function openModalMjpeg(ch) {
       const ws = new WebSocket(`ws://${location.host}/ws/${ch}?hd=1`);
       ws.binaryType = 'arraybuffer';
       modalWS = ws;
@@ -567,9 +664,6 @@
       };
 
       ws.onclose = ws.onerror = () => { modalDot.className = 'status-dot offline'; };
-
-      modalLabel.textContent = `CH ${ch}  ·  ${name}`;
-      modal.classList.add('open');
     }
 
     function closeModal() {

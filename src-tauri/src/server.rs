@@ -50,12 +50,12 @@ impl Quality {
     fn params(self, hd: bool) -> (u32, u32) {
         match (self, hd) {
             // ponytail: grid fps low — reduces data volume in macOS WKWebView Networking process buffers
-            (Self::Low,    false) => (1,  8),
-            (Self::Low,    true)  => (12, 5),
-            (Self::Medium, false) => (2,  6),
-            (Self::Medium, true)  => (15, 3),
-            (Self::High,   false) => (4,  3),
-            (Self::High,   true)  => (20, 2),
+            (Self::Low,    false) => (4,  8),
+            (Self::Low,    true)  => (15, 5),
+            (Self::Medium, false) => (7,  6),
+            (Self::Medium, true)  => (25, 4),
+            (Self::High,   false) => (7,  3),
+            (Self::High,   true)  => (25, 2),
         }
     }
 }
@@ -181,6 +181,14 @@ fn find_ffmpeg() -> String {
 
     log("[ffmpeg] WARNING: not found in any known location — streams will fail");
     "ffmpeg".to_string()
+}
+
+fn find_aud(h: &[u8], from: usize) -> Option<usize> {
+    h.get(from..)?.windows(5).position(|w| w == [0, 0, 1, 0x46, 1]).map(|i| i + from)
+}
+
+fn has_idr(au: &[u8]) -> bool {
+    au.windows(4).any(|w| w[..3] == [0, 0, 1] && (16..=21).contains(&((w[3] >> 1) & 0x3f)))
 }
 
 fn find_bytes(hay: &[u8], needle: &[u8; 2], from: usize) -> Option<usize> {
@@ -324,7 +332,8 @@ async fn api_quality(State(s): State<AppState>) -> Json<serde_json::Value> {
 
 #[derive(Deserialize)]
 struct WsQuery {
-    hd: Option<String>,
+    hd:   Option<String>,
+    pass: Option<String>,
 }
 
 async fn ws_camera(
@@ -333,11 +342,13 @@ async fn ws_camera(
     Query(q):        Query<WsQuery>,
     State(state):    State<AppState>,
 ) -> impl IntoResponse {
-    let hd = q.hd.as_deref() == Some("1");
-    ws.on_upgrade(move |sock| camera_stream(sock, ch, hd, state))
+    let hd   = q.hd.as_deref() == Some("1");
+    // ponytail: HEVC passthrough (WebCodecs hw decode in the WebView) = camera's native fps, no transcode
+    let pass = q.pass.as_deref() == Some("1");
+    ws.on_upgrade(move |sock| camera_stream(sock, ch, hd, pass, state))
 }
 
-async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
+async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, pass: bool, state: AppState) {
     let session = match state.session.read().unwrap().clone() {
         Some(s) => s,
         None    => return,
@@ -354,6 +365,15 @@ async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
     );
     let vf = format!("fps={fps}");
 
+    let out_args: Vec<String> = if pass {
+        // no transcode: raw Annex-B HEVC (DVR cameras are H.265) with AUDs, VPS/SPS/PPS on every keyframe so we can split access units
+        ["-c:v", "copy", "-an", "-bsf:v", "dump_extra=freq=keyframe,hevc_metadata=aud=insert", "-f", "hevc", "pipe:1"]
+            .map(String::from).to_vec()
+    } else {
+        ["-f", "mjpeg", "-vf", &vf, "-q:v", &qv.to_string(), "-threads", "1", "pipe:1"]
+            .map(String::from).to_vec()
+    };
+
     let mut child = match tokio::process::Command::new(state.ffmpeg_bin.as_str())
         .args([
             "-loglevel",        "error",
@@ -363,12 +383,8 @@ async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
             "-analyzeduration", "1000000",
             "-rtsp_transport",  "tcp",
             "-i",               &url,
-            "-f",               "mjpeg",
-            "-vf",              &vf,
-            "-q:v",             &qv.to_string(),
-            "-threads",         "1",
-            "pipe:1",
         ])
+        .args(&out_args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null())
@@ -421,7 +437,9 @@ async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
     });
 
     // Pre-allocated rolling buffer — no Buffer.concat churn
-    let mut buf = Vec::<u8>::with_capacity(MAX_BUF);
+    let max_buf = if pass { 4 * MAX_BUF } else { MAX_BUF };
+    let mut buf = Vec::<u8>::with_capacity(max_buf);
+    let mut need_key = true; // pass: after any dropped frame, wait for next IDR
     let mut tmp = vec![0u8; 65536];
 
     'outer: loop {
@@ -435,8 +453,32 @@ async fn camera_stream(socket: WebSocket, ch: u32, hd: bool, state: AppState) {
                     Ok(n)  => n,
                 };
 
-                if buf.len() + n > MAX_BUF { buf.clear(); }
+                if buf.len() + n > max_buf { buf.clear(); need_key = true; }
                 buf.extend_from_slice(&tmp[..n]);
+
+                if pass {
+                    // access unit = bytes between consecutive AUD NALs (00 00 01 46 01)
+                    while let Some(s) = find_aud(&buf, 0) {
+                        let Some(e) = find_aud(&buf, s + 5) else {
+                            if s > 0 { buf.drain(..s); }
+                            break;
+                        };
+                        let key = has_idr(&buf[s..e]);
+                        if key { need_key = false; }
+                        if !need_key {
+                            let mut msg = Vec::with_capacity(e - s + 1);
+                            msg.push(key as u8);
+                            msg.extend_from_slice(&buf[s..e]);
+                            match frame_tx.try_send(msg) {
+                                Ok(_) => {}
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_))   => need_key = true,
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break 'outer,
+                            }
+                        }
+                        buf.drain(..e);
+                    }
+                    continue;
+                }
 
                 // Parse all complete JPEG frames from buf
                 loop {

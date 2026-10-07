@@ -35,6 +35,9 @@ State lives in `AppState` (in `server.rs`): `session` (DVR creds, set via `POST 
 
 ### Stream quality / sharpness model
 
+**Default path is HEVC passthrough** (`?pass=1`): ffmpeg `-c:v copy` (DVR cameras are H.265) → Annex-B access units split on AUD NALs (`[key flag][AU]` per WS message) → WebCodecs `VideoDecoder` in the WebView (`playHevc` in `index.html`) → canvas. Native camera fps, ~0% ffmpeg CPU. On any failure (no VideoDecoder, decoder error, no frame in 4 s) the frontend sets `hevcBroken` and falls back to the MJPEG path described below. Grid fps is therefore the DVR sub-stream fps (set on the DVR), not `Quality::params`.
+
+
 `Quality` (Low/Medium/High) × `hd` flag → `(fps, q:v)` via `Quality::params`:
 - **Grid cells** request `hd=false` → RTSP `subtype=1` (the camera's **sub stream**, typically low-res CIF). Low fps; ffmpeg `-vf` is just `fps=N`.
 - **Fullscreen modal** requests `?hd=1` → `subtype=0` (**main stream**, full res), higher fps.
